@@ -43,11 +43,14 @@ asm-nvim-lsp/
 ├── pyproject.toml              # deps: pygls, capstone, unicorn, keystone
 ├── server/
 │   ├── __init__.py
-│   ├── server.py               # LSP server (did_open, did_change stubs)
-│   └── parser.py               # Assembly parser (Keystone→Capstone)
+│   ├── server.py               # LSP server (inlay hints, code lens, commands)
+│   ├── parser.py               # Assembly parser (Keystone→Capstone)
+│   ├── simulator.py            # Register simulator (Unicorn)
+│   └── state.py                # Per-document state manager
 ├── lua/
 │   └── x86-register-lsp/
 │       └── init.lua            # Neovim plugin entry point
+├── .gitignore
 └── README.md
 ```
 
@@ -98,8 +101,8 @@ Commands:
 
 - [x] Task 1 — Project scaffold (pyproject.toml, deps, skeleton)
 - [x] Task 2 — Assembly parser (Keystone → Capstone, reg access, labels, @reg)
-- [ ] Task 3 — Register simulator (Unicorn step-through)
-- [ ] Task 4 — LSP inlay hints + code lens + commands
+- [x] Task 3 — Register simulator (Unicorn step-through)
+- [x] Task 4 — LSP inlay hints + code lens + commands
 - [ ] Task 5 — Neovim sidebar (Lua)
 - [ ] Task 6 — @reg directive parsing from source (done in Task 2)
 - [ ] Task 7 — Error diagnostics
