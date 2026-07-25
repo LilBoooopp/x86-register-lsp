@@ -47,6 +47,7 @@ class RegSnapshot:
     address: int                    # RIP at this point
     values: dict[str, int]          # reg name → value
     changed: list[str]              # which regs differ from previous snapshot
+    stack: list[int] | None = None  # stack qwords around RSP (16 entries above RSP)
     error: str | None = None
 
 
@@ -119,7 +120,7 @@ def simulate(
     mu.mem_map(STACK_BASE, stack_size)
 
     # ── 3. set initial register values ──────────────────────────────────
-    rsp_initial = STACK_BASE + stack_size - 8
+    rsp_initial = STACK_BASE + stack_size - 8 - 128  # leave room for stack read
     mu.reg_write(UC_X86_REG_RSP, rsp_initial)
     mu.reg_write(UC_X86_REG_RBP, rsp_initial)
 
@@ -164,11 +165,25 @@ def simulate(
                         if name in prev_inst.reg_access.writes:
                             changed.append(name)
 
+            # read stack memory around RSP (16 qwords = 128 bytes)
+            stack_vals: list[int] | None = None
+            try:
+                rsp_val = values.get("rsp", 0)
+                if rsp_val != 0:
+                    raw = mu.mem_read(rsp_val, 16 * 8)
+                    stack_vals = [
+                        int.from_bytes(raw[i:i+8], 'little', signed=False)
+                        for i in range(0, len(raw), 8)
+                    ]
+            except Exception:
+                pass
+
             snapshots.append(RegSnapshot(
                 instruction_index=idx,
                 address=rip,
                 values=values,
                 changed=changed,
+                stack=stack_vals,
             ))
 
             prev_values = values
@@ -184,6 +199,7 @@ def simulate(
                 address=rip if 'rip' in dir() else 0,
                 values=prev_values if prev_values else {},
                 changed=[],
+                stack=None,
                 error=str(e),
             ))
             break  # stop on error — state is unreliable past this point

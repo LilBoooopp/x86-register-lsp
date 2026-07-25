@@ -59,5 +59,6 @@ class DocumentState:
                     "values": snap.values,
                     "changed": snap.changed,
                     "instruction_index": snap.instruction_index,
+                    "stack": snap.stack,
                 }
         return None
