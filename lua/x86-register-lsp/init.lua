@@ -11,12 +11,7 @@ function M.setup(opts)
 
     -- user commands
     vim.api.nvim_create_user_command("X86RegRun", function()
-        local clients = vim.lsp.get_clients({ name = "x86-register-lsp" })
-        if #clients == 0 then
-            vim.notify("x86-register-lsp not running", vim.log.levels.WARN)
-            return
-        end
-        clients[1].request("workspace/executeCommand", {
+        vim.lsp.buf_request(0, "workspace/executeCommand", {
             command = "x86reg.runSimulation",
             arguments = { vim.uri_from_bufnr(0) },
         }, function(err)
@@ -33,13 +28,7 @@ function M.setup(opts)
     end, {})
 
     vim.api.nvim_create_user_command("X86RegSet", function(info)
-        -- :X86RegSet rax=42 rbx=100
-        local clients = vim.lsp.get_clients({ name = "x86-register-lsp" })
-        if #clients == 0 then
-            vim.notify("x86-register-lsp not running", vim.log.levels.WARN)
-            return
-        end
-        clients[1].request("workspace/executeCommand", {
+        vim.lsp.buf_request(0, "workspace/executeCommand", {
             command = "x86reg.setRegisters",
             arguments = { vim.uri_from_bufnr(0), info.args },
         })
