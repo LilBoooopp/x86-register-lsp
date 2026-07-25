@@ -103,10 +103,10 @@ Commands:
 - [x] Task 2 — Assembly parser (Keystone → Capstone, reg access, labels, @reg)
 - [x] Task 3 — Register simulator (Unicorn step-through)
 - [x] Task 4 — LSP inlay hints + code lens + commands
-- [ ] Task 5 — Neovim sidebar (Lua)
-- [ ] Task 6 — @reg directive parsing from source (done in Task 2)
-- [ ] Task 7 — Error diagnostics
-- [ ] Task 8 — Plugin polish (keymaps, docs)
+- [x] Task 5 — Neovim sidebar (Lua)
+- [x] Task 6 — @reg directive parsing (built into parser.py)
+- [x] Task 7 — Error diagnostics (parse errors → LSP diagnostics)
+- [x] Task 8 — Plugin polish (keymaps, docs)
 
 ## Dependencies
 
