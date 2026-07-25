@@ -30,6 +30,7 @@ from lsprotocol.types import (
     DiagnosticSeverity,
     Position,
     Range,
+    PublishDiagnosticsParams,
     # initialize
     INITIALIZE,
     InitializeParams,
@@ -294,7 +295,9 @@ def _publish_diagnostics(ls: LanguageServer, uri: str, doc: DocumentState):
                 source="x86-register-lsp (sim)",
             ))
 
-    ls.text_document_publish_diagnostics(uri, diagnostics)
+    ls.text_document_publish_diagnostics(
+        PublishDiagnosticsParams(uri=uri, diagnostics=diagnostics)
+    )
 
 
 # ── entry point ─────────────────────────────────────────────────────────────
