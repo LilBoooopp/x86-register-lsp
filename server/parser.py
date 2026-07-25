@@ -1,7 +1,8 @@
 """
 x86_64 assembly parser.
 
-Pipeline: source text → Keystone (assemble) → bytes → Capstone (disassemble + reg info)
+Pipeline: source text → Keystone (assemble full block) → Capstone (disassemble + reg info)
+Line mapping: code lines are tracked during scan, then zipped with Capstone output.
 """
 
 import re
@@ -26,124 +27,90 @@ for _name in dir(x86_const):
 
 @dataclass
 class RegAccess:
-    """Which registers an instruction reads and writes."""
     reads: list[str] = field(default_factory=list)
     writes: list[str] = field(default_factory=list)
 
 
 @dataclass
 class ParsedInstruction:
-    """One decoded instruction with its register footprint."""
-    address: int            # byte offset from start of code
-    mnemonic: str           # "mov", "add", "push", ...
-    operands: str           # "rax, qword ptr [rbx]"
+    address: int
+    mnemonic: str
+    operands: str
     reg_access: RegAccess
     line_number: int        # 1-based line in source
-    raw_line: str           # original source line text
+    raw_line: str
 
 
 @dataclass
 class ParsedBlock:
-    """Full parse result for an assembly source buffer."""
     instructions: list[ParsedInstruction]
-    labels: dict[str, int] = field(default_factory=dict)          # name → instruction index
-    register_directives: dict[str, int] = field(default_factory=dict)  # reg → value
+    labels: dict[str, int] = field(default_factory=dict)
+    register_directives: dict[str, int] = field(default_factory=dict)
     errors: list[str] = field(default_factory=list)
 
 
-# ── engines (reusable module-level singletons) ──────────────────────────────
+# ── engines ─────────────────────────────────────────────────────────────────
 
 _KS = Ks(KS_ARCH_X86, KS_MODE_64)
-
 _CS = Cs(CS_ARCH_X86, CS_MODE_64)
 _CS.detail = True
 
 
 # ── helpers ─────────────────────────────────────────────────────────────────
 
-_COMMENT_RE = re.compile(r'^\s*(?:[;#]|//)')
 _LABEL_RE = re.compile(r'^([\._a-zA-Z][\._a-zA-Z0-9]*):\s*(.*)$')
 _REG_DIRECTIVE_RE = re.compile(r'\s*[;#]\s*@reg\s+(.*)')
 
-# Assembler directives Keystone can't assemble — skip these lines silently
 _DIRECTIVES = {
     'section', 'global', 'extern', 'bits', 'default', 'align',
-    'segment', 'org', 'cpu', 'bits', 'bss', 'text', 'data',
+    'segment', 'org', 'cpu', 'bss', 'text', 'data',
 }
 
 
 def _access_from_capstone(insn) -> RegAccess:
-    """
-    Extract register read/write sets from a Capstone instruction.
-
-    In Capstone v5, explicit operands carry per-operand access flags
-    (CS_AC_READ / CS_AC_WRITE), while implicit registers (RSP for
-    push/pop, EFLAGS for arithmetic) are in insn.regs_read/regs_write.
-    """
     reads: set[str] = set()
     writes: set[str] = set()
-
-    # explicit operands
     for op in insn.operands:
-        if op.type == 1 and op.reg in REG_NAMES:  # type 1 = register
+        if op.type == 1 and op.reg in REG_NAMES:
             name = REG_NAMES[op.reg]
             if op.access & CS_AC_READ:
                 reads.add(name)
             if op.access & CS_AC_WRITE:
                 writes.add(name)
-
-    # implicit registers
     for rid in insn.regs_read:
         if rid in REG_NAMES:
             reads.add(REG_NAMES[rid])
     for rid in insn.regs_write:
         if rid in REG_NAMES:
             writes.add(REG_NAMES[rid])
-
-    # remove eflags from writes (every arithmetic op touches it — noise)
     writes.discard("eflags")
-
     return RegAccess(reads=sorted(reads), writes=sorted(writes))
 
 
-def _is_directive(word: str) -> bool:
-    """Check if a word is an assembler directive (not an instruction)."""
-    return word.lower() in _DIRECTIVES
+# ── parse ───────────────────────────────────────────────────────────────────
 
-
-# ── main parse function ─────────────────────────────────────────────────────
 
 def parse_assembly(source: str, base_address: int = 0x1000) -> ParsedBlock:
-    """
-    Parse x86_64 assembly source into a block of instructions with register
-    access information, labels, and @reg directives.
+    """Parse x86_64 assembly source. Assembles the entire code block at once
+    for correct label resolution, then maps instructions back to source lines."""
 
-    Args:
-        source: raw assembly text (Intel syntax).
-        base_address: starting address for the code (default 0x1000).
-
-    Returns:
-        ParsedBlock with instructions, labels, register_directives, and errors.
-    """
     lines = source.split("\n")
-    instructions: list[ParsedInstruction] = []
-    labels: dict[str, int] = {}
     register_directives: dict[str, int] = {}
     errors: list[str] = []
 
-    address = base_address
+    # ── scan: collect code lines and label positions ───────────────────
+    code_lines: list[tuple[int, str, str]] = []  # (lineno, raw_line, code_text)
+    labels: dict[str, int] = {}                  # name → expected instruction index
+    asm_text_parts: list[str] = []               # lines of the full asm block
 
     for lineno, raw in enumerate(lines, 1):
         text = raw.rstrip()
 
-        # skip blank lines
         if not text:
             continue
 
-        # check for @reg directive in comments (BEFORE generic comment skip)
-        if not text.startswith((";", "#", "//")):
-            pass  # not a comment line
-        else:
+        # @reg directives in comments
+        if text.startswith((";", "#", "//")):
             reg_match = _REG_DIRECTIVE_RE.match(text)
             if reg_match:
                 for pair in reg_match.group(1).split():
@@ -153,52 +120,77 @@ def parse_assembly(source: str, base_address: int = 0x1000) -> ParsedBlock:
                             register_directives[reg.strip()] = int(val.strip(), 0)
                         except ValueError:
                             errors.append(f"Line {lineno}: invalid @reg value '{val}'")
-            continue  # skip all comment lines
+            continue
 
-        # extract label if present
+        # extract label
         label_match = _LABEL_RE.match(text)
         label_name = None
         code = text
         if label_match:
             label_name = label_match.group(1)
-            labels[label_name] = len(instructions)  # points to next instruction
             code = label_match.group(2).strip()
 
         if not code:
-            continue  # label-only line
+            if label_name:
+                labels[label_name] = len(code_lines)  # points to next instruction
+                asm_text_parts.append(f"{label_name}:")
+        else:
+            first_word = code.split()[0] if code.split() else ""
+            if first_word.lower() in _DIRECTIVES:
+                continue
 
-        # skip assembler directives
-        first_word = code.split()[0] if code.split() else ""
-        if _is_directive(first_word):
-            continue
+            # record this as a code line
+            if label_name:
+                labels[label_name] = len(code_lines)  # points to this instruction's index
+            code_lines.append((lineno, raw, code))
+            if label_name:
+                asm_text_parts.append(f"{label_name}: {code}")
+            else:
+                asm_text_parts.append(code)
 
-        # assemble → disassemble to get register detail
-        try:
-            encoding, count = _KS.asm(code, address)
-        except Exception as e:
-            errors.append(f"Line {lineno}: {e}")
-            continue
+    if not code_lines:
+        return ParsedBlock([], labels=labels, register_directives=register_directives,
+                           errors=errors)
 
-        if count == 0:
-            continue
+    # ── assemble full block ────────────────────────────────────────────
+    full_asm = "\n".join(asm_text_parts)
+    try:
+        encoding, stmt_count = _KS.asm(full_asm, base_address)
+    except Exception as e:
+        errors.append(f"Assembly failed: {e}")
+        return ParsedBlock([], labels=labels, register_directives=register_directives,
+                           errors=errors)
 
-        bytes_data = bytes(encoding)
-        try:
-            for insn in _CS.disasm(bytes_data, address):
-                reg_access = _access_from_capstone(insn)
-                instructions.append(ParsedInstruction(
-                    address=insn.address,
-                    mnemonic=insn.mnemonic,
-                    operands=insn.op_str,
-                    reg_access=reg_access,
-                    line_number=lineno,
-                    raw_line=raw,
-                ))
-                address = insn.address + insn.size
-                break  # one source line → one instruction
-        except Exception as e:
-            errors.append(f"Line {lineno}: {e}")
-            continue
+    if not encoding:
+        return ParsedBlock([], labels=labels, register_directives=register_directives,
+                           errors=errors)
+
+    # ── disassemble with Capstone ───────────────────────────────────────
+    instructions: list[ParsedInstruction] = []
+    capstone_insts = list(_CS.disasm(bytes(encoding), base_address))
+
+    if len(capstone_insts) != len(code_lines):
+        errors.append(
+            f"Mismatch: {len(capstone_insts)} instructions assembled but "
+            f"{len(code_lines)} code lines. Some lines may have failed."
+        )
+        # best-effort: take min of both
+        n = min(len(capstone_insts), len(code_lines))
+    else:
+        n = len(code_lines)
+
+    for i in range(n):
+        insn = capstone_insts[i]
+        lineno, raw, _code = code_lines[i]
+        reg_access = _access_from_capstone(insn)
+        instructions.append(ParsedInstruction(
+            address=insn.address,
+            mnemonic=insn.mnemonic,
+            operands=insn.op_str,
+            reg_access=reg_access,
+            line_number=lineno,
+            raw_line=raw,
+        ))
 
     return ParsedBlock(
         instructions=instructions,
