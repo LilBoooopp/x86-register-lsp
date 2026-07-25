@@ -46,6 +46,7 @@ class ParsedBlock:
     instructions: list[ParsedInstruction]
     labels: dict[str, int] = field(default_factory=dict)
     register_directives: dict[str, int] = field(default_factory=dict)
+    memory_regions: dict[int, bytes] = field(default_factory=dict)
     errors: list[str] = field(default_factory=list)
 
 
@@ -60,6 +61,7 @@ _CS.detail = True
 
 _LABEL_RE = re.compile(r'^([\._a-zA-Z][\._a-zA-Z0-9]*):\s*(.*)$')
 _REG_DIRECTIVE_RE = re.compile(r'\s*[;#]\s*@reg\s+(.*)')
+_MEM_DIRECTIVE_RE = re.compile(r'\s*[;#]\s*@mem\s+(.*)')
 
 _DIRECTIVES = {
     'section', 'global', 'extern', 'bits', 'default', 'align',
@@ -90,12 +92,69 @@ def _access_from_capstone(insn) -> RegAccess:
 # ── parse ───────────────────────────────────────────────────────────────────
 
 
+def _parse_mem_directive(
+    text: str, lineno: int,
+    regions: dict[int, bytes],
+    errors: list[str],
+) -> None:
+    """Parse a @mem directive like '0x4000=hello world' or '0x4000=72 101 108'.
+
+    Format: <address>=<data>
+      data can be a quoted string, or space/comma-separated bytes (decimal or hex).
+      Examples:
+        @mem 0x4000=hello
+        @mem 0x4000="hello\0world"
+        @mem 0x4000=72 101 108 108 111 0
+        @mem 0x4000=0x48 0x65 0x6C 0x6C 0x6F 0x00
+    """
+    if "=" not in text:
+        errors.append(f"Line {lineno}: @mem missing '=', expected '@mem addr=data'")
+        return
+
+    addr_str, data_str = text.split("=", 1)
+    try:
+        addr = int(addr_str.strip(), 0)
+    except ValueError:
+        errors.append(f"Line {lineno}: @mem invalid address '{addr_str.strip()}'")
+        return
+
+    data_str = data_str.strip()
+
+    # quoted string with escape support
+    if data_str.startswith('"') and data_str.endswith('"'):
+        raw = data_str[1:-1]
+        raw = raw.replace("\\0", "\0").replace("\\n", "\n").replace("\\t", "\t").replace("\\\\", "\\")
+        regions[addr] = raw.encode("utf-8")
+        return
+
+    # try space/comma-separated bytes first
+    parts = re.split(r'[,\s]+', data_str)
+    bytes_list: list[int] = []
+    for p in parts:
+        p = p.strip()
+        if not p:
+            continue
+        try:
+            bytes_list.append(int(p, 0))
+        except ValueError:
+            bytes_list = []  # not byte values, treat as string
+            break
+    if bytes_list:
+        regions[addr] = bytes(bytes_list)
+        return
+
+    # treat as raw string with escape support
+    raw = data_str.replace("\\0", "\0").replace("\\n", "\n").replace("\\t", "\t").replace("\\\\", "\\")
+    regions[addr] = raw.encode("utf-8")
+
+
 def parse_assembly(source: str, base_address: int = 0x1000) -> ParsedBlock:
     """Parse x86_64 assembly source. Assembles the entire code block at once
     for correct label resolution, then maps instructions back to source lines."""
 
     lines = source.split("\n")
     register_directives: dict[str, int] = {}
+    memory_regions: dict[int, bytes] = {}
     errors: list[str] = []
 
     # ── scan: collect code lines and label positions ───────────────────
@@ -120,6 +179,10 @@ def parse_assembly(source: str, base_address: int = 0x1000) -> ParsedBlock:
                             register_directives[reg.strip()] = int(val.strip(), 0)
                         except ValueError:
                             errors.append(f"Line {lineno}: invalid @reg value '{val}'")
+            mem_match = _MEM_DIRECTIVE_RE.match(text)
+            if mem_match:
+                _parse_mem_directive(mem_match.group(1), lineno,
+                                     memory_regions, errors)
             continue
 
         # extract label
@@ -150,7 +213,7 @@ def parse_assembly(source: str, base_address: int = 0x1000) -> ParsedBlock:
 
     if not code_lines:
         return ParsedBlock([], labels=labels, register_directives=register_directives,
-                           errors=errors)
+                           memory_regions=memory_regions, errors=errors)
 
     # ── assemble full block ────────────────────────────────────────────
     full_asm = "\n".join(asm_text_parts)
@@ -196,5 +259,6 @@ def parse_assembly(source: str, base_address: int = 0x1000) -> ParsedBlock:
         instructions=instructions,
         labels=labels,
         register_directives=register_directives,
+        memory_regions=memory_regions,
         errors=errors,
     )

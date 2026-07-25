@@ -6,7 +6,7 @@ Steps through parsed instructions, recording register state before each one.
 
 from dataclasses import dataclass, field
 
-from unicorn import Uc, UC_ARCH_X86, UC_MODE_64
+from unicorn import Uc, UC_ARCH_X86, UC_MODE_64, UC_HOOK_CODE
 from unicorn.x86_const import *
 
 from server.parser import ParsedBlock, ParsedInstruction
@@ -83,6 +83,7 @@ def simulate(
         return SimulationResult([], ["No instructions to simulate"])
 
     initial_regs = initial_regs or {}
+    errors: list[str] = []
 
     # ── 1. re-assemble all instructions into a contiguous binary ────────
     all_bytes = bytearray()
@@ -109,15 +110,26 @@ def simulate(
     # ── 2. set up Unicorn ───────────────────────────────────────────────
     mu = Uc(UC_ARCH_X86, UC_MODE_64)
 
-    # map code region (2 MB, page-aligned)
+    # map code region (page-aligned, just big enough)
     CODE_BASE = base & ~0xFFF
-    CODE_SIZE = 2 * 1024 * 1024
-    mu.mem_map(CODE_BASE, CODE_SIZE)
+    code_size = ((code_end - CODE_BASE) + 0xFFF) & ~0xFFF
+    mu.mem_map(CODE_BASE, max(code_size, 0x1000))
     mu.mem_write(base, bytes(all_bytes))
 
     # map stack
     STACK_BASE = 0x7FFF0000
     mu.mem_map(STACK_BASE, stack_size)
+
+    # map user-defined memory regions from @mem directives
+    for addr, data in block.memory_regions.items():
+        # page-align the mapping
+        page_base = addr & ~0xFFF
+        page_end = (addr + len(data) + 0xFFF) & ~0xFFF
+        try:
+            mu.mem_map(page_base, page_end - page_base)
+            mu.mem_write(addr, data)
+        except Exception as e:
+            errors.append(f"@mem 0x{addr:X}: failed to map — {e}")
 
     # ── 3. set initial register values ──────────────────────────────────
     rsp_initial = STACK_BASE + stack_size - 8 - 128  # leave room for stack read
@@ -132,76 +144,74 @@ def simulate(
 
     mu.reg_write(UC_X86_REG_RIP, base)
 
-    # ── 4. step through each instruction, recording state ───────────────
+    # ── 4. hook to capture state before each instruction ─────────────────
     snapshots: list[RegSnapshot] = []
-    errors: list[str] = []
     prev_values: dict[str, int] = {}
+    step_count = 0
+    MAX_STEPS = 10000
 
-    for idx in range(len(block.instructions)):
+    def code_hook(uc: Uc, address: int, size: int, user_data):
+        nonlocal step_count, prev_values
+        step_count += 1
+        if step_count > MAX_STEPS:
+            uc.emu_stop()
+            return
+
+        idx = addr_to_index.get(address)
+        if idx is None:
+            return  # not one of our instructions
+
         inst = block.instructions[idx]
 
-        try:
-            rip = mu.reg_read(UC_X86_REG_RIP)
+        # read all GP registers
+        values: dict[str, int] = {}
+        for name in GP_REGS_64:
+            if name in UC_REG:
+                try:
+                    values[name] = uc.reg_read(UC_REG[name])
+                except Exception:
+                    values[name] = 0
 
-            # read all GP registers (state BEFORE this instruction)
-            values: dict[str, int] = {}
+        # compute changed registers vs previous
+        changed: list[str] = []
+        if not snapshots:
+            changed = [n for n in GP_REGS_64 if values.get(n, 0) != 0]
+        else:
+            prev_inst = block.instructions[snapshots[-1].instruction_index]
             for name in GP_REGS_64:
-                if name in UC_REG:
-                    try:
-                        values[name] = mu.reg_read(UC_REG[name])
-                    except Exception:
-                        values[name] = 0
+                if values.get(name, 0) != prev_values.get(name, 0):
+                    if name in prev_inst.reg_access.writes:
+                        changed.append(name)
 
-            # compute changed registers:
-            #   snapshot 0 → show initial non-zero registers
-            #   snapshot N → show what the PREVIOUS instruction (N-1) modified
-            changed: list[str] = []
-            if idx == 0:
-                changed = [n for n in GP_REGS_64 if values.get(n, 0) != 0]
-            else:
-                prev_inst = block.instructions[idx - 1]
-                for name in GP_REGS_64:
-                    if values.get(name, 0) != prev_values.get(name, 0):
-                        if name in prev_inst.reg_access.writes:
-                            changed.append(name)
+        # read stack
+        stack_vals: list[int] | None = None
+        try:
+            rsp_val = values.get("rsp", 0)
+            if rsp_val != 0:
+                raw = uc.mem_read(rsp_val, 16 * 8)
+                stack_vals = [
+                    int.from_bytes(raw[i:i+8], 'little', signed=False)
+                    for i in range(0, len(raw), 8)
+                ]
+        except Exception:
+            pass
 
-            # read stack memory around RSP (16 qwords = 128 bytes)
-            stack_vals: list[int] | None = None
-            try:
-                rsp_val = values.get("rsp", 0)
-                if rsp_val != 0:
-                    raw = mu.mem_read(rsp_val, 16 * 8)
-                    stack_vals = [
-                        int.from_bytes(raw[i:i+8], 'little', signed=False)
-                        for i in range(0, len(raw), 8)
-                    ]
-            except Exception:
-                pass
+        snapshots.append(RegSnapshot(
+            instruction_index=idx,
+            address=address,
+            values=values,
+            changed=changed,
+            stack=stack_vals,
+        ))
+        prev_values = values
 
-            snapshots.append(RegSnapshot(
-                instruction_index=idx,
-                address=rip,
-                values=values,
-                changed=changed,
-                stack=stack_vals,
-            ))
+    mu.hook_add(UC_HOOK_CODE, code_hook)
 
-            prev_values = values
-
-            # execute exactly one instruction
-            mu.emu_start(rip, 0, count=1)
-
-        except Exception as e:
-            errors.append(f"Inst {idx} ({inst.mnemonic} {inst.operands}): {e}")
-            # still record a snapshot with what we have
-            snapshots.append(RegSnapshot(
-                instruction_index=idx,
-                address=rip if 'rip' in dir() else 0,
-                values=prev_values if prev_values else {},
-                changed=[],
-                stack=None,
-                error=str(e),
-            ))
-            break  # stop on error — state is unreliable past this point
+    # ── 5. run ──────────────────────────────────────────────────────────
+    try:
+        mu.emu_start(base, 0, timeout=5_000_000)  # 5-second timeout
+    except Exception as e:
+        if "UC_ERR_OK" not in str(e):
+            errors.append(str(e))
 
     return SimulationResult(snapshots=snapshots, errors=errors)
