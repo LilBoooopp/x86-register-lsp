@@ -35,6 +35,7 @@ from lsprotocol.types import (
     InitializeParams,
     ServerCapabilities,
     InlayHintOptions,
+    ExecuteCommandOptions,
 )
 
 from server.state import DocumentState
@@ -61,6 +62,9 @@ def initialize(ls: LanguageServer, params: InitializeParams):
     return ServerCapabilities(
         inlay_hint_provider=InlayHintOptions(resolve_provider=False),
         code_lens_provider={},
+        execute_command_provider=ExecuteCommandOptions(
+            commands=["x86reg.runSimulation", "x86reg.setRegisters"]
+        ),
     )
 
 
