@@ -230,16 +230,24 @@ def run_simulation(ls: LanguageServer, args):
     if doc:
         doc.run_simulation()
         _publish_diagnostics(ls, uri, doc)
-        server.workspace_inlay_hint_refresh()
+        server.workspace_inlay_hint_refresh(None)
 
 
 @server.command("x86reg.setRegisters")
 def set_registers(ls: LanguageServer, args):
     """Set initial register values. args: [uri, "rax=42 rbx=100"]."""
-    if len(args) < 2:
+    # pygls v2: single string arg means one argument was passed
+    if isinstance(args, list):
+        if len(args) < 2:
+            return
+        uri = args[0]
+        regs_str = args[1]
+    elif isinstance(args, str):
+        # when called from code lens, only the raw arg string
+        uri = ""  # fallback
+        regs_str = args
+    else:
         return
-    uri = args[0]
-    regs_str = args[1]
     doc = _get_doc(uri)
     if not doc:
         return
@@ -252,7 +260,7 @@ def set_registers(ls: LanguageServer, args):
             except ValueError:
                 pass
     _publish_diagnostics(ls, uri, doc)
-    server.workspace_code_lens_refresh()
+    server.workspace_code_lens_refresh(None)
 
 
 # ── diagnostics ─────────────────────────────────────────────────────────────
