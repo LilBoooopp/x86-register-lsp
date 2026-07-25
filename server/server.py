@@ -220,17 +220,16 @@ def register_at_line(ls: LanguageServer, params):
 @server.command("x86reg.runSimulation")
 def run_simulation(ls: LanguageServer, args):
     """Execute register simulation for the given URI."""
-    logging.info(f"runSimulation called with args: {args}")
-    uri = args[0] if args else ""
-    logging.info(f"Looking up doc for URI: {uri}")
+    # pygls v2 passes single args directly, lists stay as lists
+    if isinstance(args, list):
+        uri = args[0] if args else ""
+    else:
+        uri = args if isinstance(args, str) else ""
     doc = _get_doc(uri)
-    logging.info(f"Found doc: {doc is not None}")
     if doc:
         doc.run_simulation()
-        logging.info(f"Simulation done: {len(doc.simulation.snapshots) if doc.simulation else 0} snapshots")
         _publish_diagnostics(ls, uri, doc)
         server.workspace_inlay_hint_refresh()
-    logging.info(f"runSimulation complete")
 
 
 @server.command("x86reg.setRegisters")
