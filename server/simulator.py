@@ -144,11 +144,20 @@ def simulate(
 
     mu.reg_write(UC_X86_REG_RIP, base)
 
-    # ── 4. hook to capture state before each instruction ─────────────────
+    # ── 4. hooks ───────────────────────────────────────────────────────
     snapshots: list[RegSnapshot] = []
     prev_values: dict[str, int] = {}
     step_count = 0
     MAX_STEPS = 10000
+
+    def ret_hook(uc: Uc, address: int, size: int, user_data):
+        """Stop simulation at ret — prevents running into garbage."""
+        uc.emu_stop()
+
+    # Find ret instructions and hook them
+    for inst in block.instructions:
+        if inst.mnemonic == "ret":
+            mu.hook_add(UC_HOOK_CODE, ret_hook, begin=inst.address, end=inst.address + 1)
 
     def code_hook(uc: Uc, address: int, size: int, user_data):
         nonlocal step_count, prev_values
