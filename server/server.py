@@ -134,13 +134,13 @@ def inlay_hints(ls: LanguageServer, params: InlayHintParams):
             continue  # nothing changed, skip hint
 
         hints.append(InlayHint(
-            position=Position(line=line, character=0),
+            position=Position(line=line, character=len(inst.raw_line) + 2),
             label=[InlayHintLabelPart(
                 value=label,
                 tooltip=f"Line {inst.line_number}: {inst.mnemonic} {inst.operands}",
             )],
-            padding_left=False,
-            padding_right=True,
+            padding_left=True,
+            padding_right=False,
             kind=None,
         ))
 
