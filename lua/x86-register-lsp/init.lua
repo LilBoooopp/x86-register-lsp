@@ -52,6 +52,9 @@ function M.setup(opts)
                 return
             end
 
+            -- enable inlay hints for this buffer
+            vim.lsp.inlay_hint.enable(true, { bufnr = 0 })
+
             -- cursor tracking → request register state at current line
             local augroup = vim.api.nvim_create_augroup("X86RegCursor", { clear = true })
             vim.api.nvim_create_autocmd({ "CursorMoved", "CursorMovedI" }, {
