@@ -294,7 +294,7 @@ def _publish_diagnostics(ls: LanguageServer, uri: str, doc: DocumentState):
                 source="x86-register-lsp (sim)",
             ))
 
-    ls.publish_diagnostics(uri, diagnostics)
+    ls.text_document_publish_diagnostics(uri, diagnostics)
 
 
 # ── entry point ─────────────────────────────────────────────────────────────
